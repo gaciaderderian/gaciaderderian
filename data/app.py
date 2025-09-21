@@ -1,11 +1,12 @@
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import numpy as np
 
 st.set_page_config(page_title="Lebanon's External Debt in USD: 1990-2024", page_icon="📈", layout="wide")
 
 # =========================
-# USER TEXT (from your brief)
+# USER TEXT
 # =========================
 APP_TITLE = "Lebanon's External Debt in USD: 1990-2024"
 
@@ -49,7 +50,7 @@ SCATTER_WHY = """\
 # =========================
 # DATA LOADING
 # =========================
-DEFAULT_CSV_PATH = "data/external_debt_dataset.csv"   # from you
+DEFAULT_CSV_PATH = "data/external_debt_dataset.csv"
 YEAR_COL_CANDIDATES = ["year", "Year", "refPeriod", "ref period", "ref Period"]
 DEBT_COL_CANDIDATES = ["External_Debt", "external_debt", "Value", "External Debt"]
 
@@ -59,16 +60,15 @@ data_path = st.sidebar.text_input("Path to your CSV", DEFAULT_CSV_PATH)
 @st.cache_data
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    # normalize headers & drop accidental index columns
     df.columns = df.columns.str.strip()
     df = df.loc[:, ~df.columns.str.contains(r"^Unnamed")]
     return df
 
 def find_col(df: pd.DataFrame, candidates) -> str | None:
-    cols_lower = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        if cand.lower() in cols_lower:
-            return cols_lower[cand.lower()]
+    lookup = {c.lower(): c for c in df.columns}
+    for c in candidates:
+        if c.lower() in lookup:
+            return lookup[c.lower()]
     return None
 
 try:
@@ -77,20 +77,19 @@ except Exception as e:
     st.error(f"Couldn't load data from '{data_path}'. Error: {e}")
     st.stop()
 
-# Resolve column names from your list
 YEAR_COL = find_col(df, YEAR_COL_CANDIDATES) or "year"
 DEBT_COL = find_col(df, DEBT_COL_CANDIDATES) or "External_Debt"
 if YEAR_COL not in df.columns or DEBT_COL not in df.columns:
-    st.error(f"Couldn't find expected columns for Year ('{YEAR_COL}') and Debt ('{DEBT_COL}') in the data.")
+    st.error(f"Couldn't find expected columns for Year ('{YEAR_COL}') and Debt ('{DEBT_COL}').")
     st.stop()
 
-# coerce types and clean
+# coerce numeric and clean
 df[YEAR_COL] = pd.to_numeric(df[YEAR_COL], errors="coerce")
 df[DEBT_COL] = pd.to_numeric(df[DEBT_COL], errors="coerce")
 df = df.dropna(subset=[YEAR_COL, DEBT_COL]).sort_values(YEAR_COL)
 
 # =========================
-# HEADER (CENTERED) + INTRO
+# HEADER + INTRO
 # =========================
 st.markdown(
     f"""
@@ -108,15 +107,12 @@ with st.expander("Preview data (first 5 rows)", expanded=False):
     st.dataframe(df.head())
 
 # =========================
-# FILTERS (INTERACTIVE)
+# FILTERS
 # =========================
 st.sidebar.header("Filters")
-
-# Year range filter
 min_year, max_year = int(df[YEAR_COL].min()), int(df[YEAR_COL].max())
 year_range = st.sidebar.slider("Year range", min_year, max_year, (max(min_year, 1990), min(max_year, 2024)), step=1)
 
-# Debt range (Y-axis) filter
 debt_min_all, debt_max_all = float(df[DEBT_COL].min()), float(df[DEBT_COL].max())
 debt_range = st.sidebar.slider(
     "Debt range (Y axis, in USD)",
@@ -125,10 +121,8 @@ debt_range = st.sidebar.slider(
 )
 st.sidebar.caption(f"Current: ${debt_range[0]:,.0f} — ${debt_range[1]:,.0f}")
 
-# Optional: y-axis scale toggle
 use_log_y = st.sidebar.checkbox("Log scale (Y axis)", value=False)
 
-# Apply filters
 df_filt = df[
     (df[YEAR_COL] >= year_range[0]) & (df[YEAR_COL] <= year_range[1]) &
     (df[DEBT_COL] >= debt_range[0]) & (df[DEBT_COL] <= debt_range[1])
@@ -151,11 +145,11 @@ COLORSCALE = [
 ]
 
 # =========================
-# LAYOUT: TWO COLUMNS SIDE BY SIDE
+# LAYOUT: TWO COLUMNS
 # =========================
 col1, col2 = st.columns(2, gap="large")
 
-# ---- LEFT: LINE CHART ----
+# ---- LEFT: LINE ----
 with col1:
     fig_line = px.line(
         df_filt,
@@ -165,10 +159,17 @@ with col1:
         template="plotly_white"
     )
     fig_line.update_traces(line=dict(color=MAGENTA, width=3), marker=dict(color=MAGENTA, size=6))
+    # If there are negatives and log is requested, log won't work. Fall back to linear with a note.
+    if use_log_y and (df_filt[DEBT_COL] <= 0).any():
+        st.info("Log scale disabled for the line chart because the filtered data contains non-positive values.")
+        yaxis_type = "linear"
+    else:
+        yaxis_type = "log" if use_log_y else "linear"
+
     fig_line.update_layout(
         xaxis_title="Year",
         yaxis_title="External Debt (Current USD)",
-        yaxis_type="log" if use_log_y else "linear",
+        yaxis_type=yaxis_type,
         hovermode="x unified",
         margin=dict(l=10, r=10, t=50, b=0),
     )
@@ -180,20 +181,37 @@ with col1:
     st.markdown("**Why this graph?**")
     st.write(LINE_WHY)
 
-# ---- RIGHT: SCATTER PLOT ----
+# ---- RIGHT: SCATTER ----
 with col2:
-    # size encodes magnitude; cap size so it looks good
-    size_range = [4, 16]
+    # Size must be non-negative -> use absolute values, replace zeros with tiny positive
+    df_plot = df_filt.copy()
+    size_abs = df_plot[DEBT_COL].abs()
+    if (size_abs == 0).any():
+        # choose a small positive size based on data scale
+        tiny = max(size_abs[size_abs > 0].min() * 0.1 if (size_abs > 0).any() else 1.0, 1.0)
+        size_abs = size_abs.replace(0, tiny)
+    df_plot["Debt_Size"] = size_abs
+
     fig_scatter = px.scatter(
-        df_filt,
+        df_plot,
         x=YEAR_COL, y=DEBT_COL,
-        color=DEBT_COL, size=DEBT_COL, size_max=size_range[1],
+        color=DEBT_COL,              # keep true values (may be negative) for color
+        size="Debt_Size",            # always >= 0 so Plotly is happy
+        size_max=16,
         title="Scatter of External Debt (USD)",
         template="plotly_white"
     )
+    # Optional: also respect log toggle if possible (only if all positive in filtered y)
+    if use_log_y and (df_plot[DEBT_COL] <= 0).any():
+        st.info("Log scale disabled for the scatter because the filtered data contains non-positive values.")
+        scatter_yaxis_type = "linear"
+    else:
+        scatter_yaxis_type = "log" if use_log_y else "linear"
+
     fig_scatter.update_layout(
         xaxis_title="Year",
         yaxis_title="External Debt (Current USD)",
+        yaxis_type=scatter_yaxis_type,
         coloraxis_colorscale=COLORSCALE,
         margin=dict(l=10, r=10, t=50, b=0),
     )
