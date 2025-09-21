@@ -62,7 +62,7 @@ with tab1:
             x=x_col,
             y=y_col,
             color=color_col if color_col else None,
-            trendline="ols",  # adds a regression line for insight
+            trendline=None,  # adds a regression line for insight
             height=500
         )
         st.plotly_chart(fig1, use_container_width=True)
